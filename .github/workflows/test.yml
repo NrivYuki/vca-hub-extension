@@ -1,0 +1,32 @@
+# vca-hub を通した疎通のテスト。vca-hub と OLDP の参照実装を隣のフォルダに取り出す。
+# ホストの鍵の暗号化(DPAPI)を確かめるため、Windows で動かす。実際の機器の側との確かめ(tools/verify-device.js)は手元で行う
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vca-hub-extension
+      - uses: actions/checkout@v4
+        with:
+          repository: NrivYuki/vca-hub
+          path: vca-hub
+      - uses: actions/checkout@v4
+        with:
+          repository: NrivYuki/optical-lab-device-protocol-reference
+          path: optical-lab-device-protocol-reference
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: テスト
+        working-directory: vca-hub-extension
+        run: node --test tests/integration.test.js
