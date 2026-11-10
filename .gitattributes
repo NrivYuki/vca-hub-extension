@@ -1,0 +1,4 @@
+# 行末は LF にそろえる。VCA の見本は CRLF が規格の決まりなので、バイト列のまま扱う。.bat は Windows のコマンドプロンプトで動かすため CRLF にする
+* text=auto eol=lf
+*.vca -text
+*.bat text eol=crlf

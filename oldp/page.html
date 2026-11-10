@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>機器のペアリング</title>
+<style>
+  :root {
+    --font: "BIZ UDPゴシック", "BIZ UDPGothic", system-ui, "Hiragino Sans", "Yu Gothic UI", sans-serif;
+    --mono: "BIZ UDゴシック", "BIZ UDGothic", ui-monospace, Consolas, monospace;
+    --bg: #ffffff; --band: #f2f3f4; --ink: #1a1a1a; --ink-2: #3a3f44; --muted: #555b61; --line: #c8ccd0; --line-light: #dde0e3;
+    --accent: #1f3a5f; --accent-ink: #ffffff; --warn-bg: #fff6df; --warn-ink: #5c4300; --err-bg: #fde8e8; --err-ink: #7a1a1a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14171c; --band: #1d2127; --ink: #e6e8eb; --ink-2: #c4c9cf; --muted: #9aa1a9; --line: #3a4048; --line-light: #2c3138;
+      --accent: #8fb0d6; --accent-ink: #0e1520; --warn-bg: #352b10; --warn-ink: #f0d58f; --err-bg: #3a1c1c; --err-ink: #f2b6b6;
+    }
+  }
+  * { box-sizing: border-box; border-radius: 0; }
+  body { margin: 0; padding: 14px 18px 24px; background: var(--bg); color: var(--ink); font: 14px/1.7 var(--font); }
+  h2 { font-size: 15px; margin: 0 0 8px; padding-bottom: 4px; border-bottom: 2px solid var(--ink); }
+  h3 { font-size: 13px; margin: 16px 0 4px; color: var(--muted); }
+  p { margin: 6px 0; font-size: 12.5px; color: var(--ink-2); }
+  .fp { font: 700 18px var(--mono); letter-spacing: 0.06em; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { padding: 4px 6px; text-align: left; border-bottom: 1px solid var(--line-light); }
+  th { color: var(--muted); font-weight: 400; font-size: 12px; background: var(--band); border-bottom: 1px solid var(--line); }
+  td.mono { font-family: var(--mono); }
+  button { font: inherit; font-size: 12.5px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); padding: 2px 10px; cursor: pointer; }
+  button:hover { border-color: var(--ink); }
+  button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .empty { color: var(--muted); font-size: 12.5px; }
+  .pending td { background: var(--warn-bg); color: var(--warn-ink); }
+  .msg { margin-top: 10px; padding: 4px 10px; font-size: 12.5px; border: 2px solid currentColor; background: var(--err-bg); color: var(--err-ink); }
+</style>
+</head>
+<body>
+<h2>機器のペアリング</h2>
+<p>OLDP(Optical Lab Device Protocol)で通信できるのは、ペアリングした機器だけです。知らない機器が接続すると、「ペアリング待ち」に表示されます。フィンガープリントを機器の画面やラベルと見比べ、同じときだけ「信じる」を選んでください。</p>
+<h3>この vca-hub の鍵のフィンガープリント(機器の側でペアリングするとき、機器に出るフィンガープリントと見比べる)</h3>
+<div class="fp" id="host">-</div>
+<h3>ペアリング待ち</h3>
+<table><thead><tr><th>フィンガープリント</th><th>機器</th><th>つないだところ</th><th></th></tr></thead><tbody id="pending"></tbody></table>
+<h3>ペアリングした機器</h3>
+<table><thead><tr><th>フィンガープリント</th><th>機器</th><th>ペアリングした日時</th><th></th></tr></thead><tbody id="trusted"></tbody></table>
+<h3>いまつないでいる機器</h3>
+<table><thead><tr><th>フィンガープリント</th><th>機器</th><th></th></tr></thead><tbody id="connected"></tbody></table>
+<div class="msg" id="msg" hidden></div>
+<script>
+const $ = id => document.getElementById(id);
+const API = '/api/ext/oldp/';
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+async function call(p, body) {
+  const res = await fetch(API + p, body ? { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-VCA-Hub': '1' }, body: JSON.stringify(body) } : {});
+  const r = await res.json();
+  if (!res.ok) throw new Error(r.message || r.error);
+  return r;
+}
+const dev = d => `${esc(d.dev)} ${esc(d.ven)} ${esc(d.model)} ${esc(d.sn)}`;
+async function load() {
+  const r = await call('peers');
+  $('host').textContent = r.host;
+  const pend = Object.entries(r.pending), tr = Object.entries(r.trusted);
+  $('pending').innerHTML = pend.map(([fp, d]) => `<tr class="pending"><td class="mono">${esc(fp)}</td><td>${dev(d)}</td><td class="mono">${esc(d.from)}</td>
+    <td><button class="on" data-trust="${esc(fp)}">信じる</button> <button data-drop="${esc(fp)}">消す</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty">ありません</td></tr>';
+  $('trusted').innerHTML = tr.map(([fp, d]) => `<tr><td class="mono">${esc(fp)}</td><td>${dev(d)}</td><td>${esc((d.trustedAt || '').slice(0, 16).replace('T', ' '))}</td>
+    <td><button data-drop="${esc(fp)}">外す</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty">ありません</td></tr>';
+  const con = await call('connected');
+  $('connected').innerHTML = con.map(d => `<tr><td class="mono">${esc(d.fingerprint)}</td><td>${dev(d)}</td><td><button data-ping="${esc(d.fingerprint)}">PING</button></td></tr>`).join('') || '<tr><td colspan="3" class="empty">ありません</td></tr>';
+  for (const b of document.querySelectorAll('[data-ping]')) b.onclick = async () => { try { const r = await call('ping', { fingerprint: b.dataset.ping }); b.textContent = `PING ${r.ms} ms`; } catch (e) { $('msg').hidden = false; $('msg').textContent = e.message; } };
+  for (const b of document.querySelectorAll('[data-trust]')) b.onclick = () => act('trust', b.dataset.trust);
+  for (const b of document.querySelectorAll('[data-drop]')) b.onclick = () => act('untrust', b.dataset.drop);
+}
+async function act(what, fingerprint) {
+  try { await call(what, { fingerprint }); $('msg').hidden = true; await load(); } catch (e) { $('msg').hidden = false; $('msg').textContent = e.message; }
+}
+load().catch(e => { $('msg').hidden = false; $('msg').textContent = e.message; });
+setInterval(() => load().catch(() => {}), 3000);
+</script>
+</body>
+</html>
