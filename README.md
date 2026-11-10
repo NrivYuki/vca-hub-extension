@@ -4,7 +4,7 @@ vca-hub に機能を加える拡張を置くリポジトリである。
 
 | フォルダ | 中身 |
 |---|---|
-| `oldp/` | OLDP(Optical Lab Device Protocol)の通信方式と、機器のペアリングの管理画面 |
+| `oldp/` | OLDP([Optical Lab Device Protocol](https://github.com/NrivYuki/optical-lab-device-protocol))の通信方式と、機器のペアリングの管理画面 |
 | `tests/` | vca-hub を通した疎通のテスト |
 | `tools/verify-device.js` | 機器の側の実装を vca-hub とつなぎ、規格の流れを一通り確かめる道具 |
 
@@ -12,8 +12,8 @@ vca-hub に機能を加える拡張を置くリポジトリである。
 
 | もの | 置き場所と用途 |
 |---|---|
-| vca-hub | 隣のフォルダ(`../vca-hub`)か、環境変数 `OLDP_VCA_HUB` で指定した場所。テストと `verify-device.js` で使う |
-| OLDP の参照実装(optical-lab-device-protocol-reference) | 隣のフォルダ(`../optical-lab-device-protocol-reference`)か、環境変数 `OLDP_REFERENCE` で指定した場所。`oldp/` が規格の処理に使う(読み込みは `oldp/reference.js`) |
+| [vca-hub](https://github.com/NrivYuki/vca-hub) | 隣のフォルダ(`../vca-hub`)か、環境変数 `OLDP_VCA_HUB` で指定した場所。テストと `verify-device.js` で使う |
+| OLDP の参照実装([optical-lab-device-protocol-reference](https://github.com/NrivYuki/optical-lab-device-protocol-reference)) | 隣のフォルダ(`../optical-lab-device-protocol-reference`)か、環境変数 `OLDP_REFERENCE` で指定した場所。`oldp/` が規格の処理に使う(読み込みは `oldp/reference.js`) |
 
 ## OLDP の通信方式(oldp/)
 
