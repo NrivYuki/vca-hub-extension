@@ -59,6 +59,12 @@ node tools/verify-device.js h8 COM3
 node tools/verify-device.js h8lan COM3
 ```
 
+基板のシリアルの速度を変えてあるとき(基板の `baud` コマンド)は、3 つ目にその速度を渡す。4 つ目に PC の側の速度を渡すと、PC の側だけをその速度にする(規格の一覧にない速度を試すため)。
+
+```
+node tools/verify-device.js h8 COM3 57600
+```
+
 ## 確かめた環境
 
 Windows 10 Pro(10.0.19045)、Node.js 24.20.0、Windows PowerShell 5.1(DPAPI)で確かめた。機器の側の環境は、参照実装の README に示す。

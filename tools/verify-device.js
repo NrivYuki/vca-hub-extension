@@ -3,6 +3,8 @@
 //   node tools/verify-device.js sim         WSL で動かす C の模擬機器(先に参照実装のフォルダの WSL で make -C c sim_device)
 //   node tools/verify-device.js h8 [COM11]  H8 の基板(ファームウェアを書いてあること。DIP スイッチは ON・OFF・ON・ON)
 //   node tools/verify-device.js h8lan [COM11]  H8 の基板を LAN で(基板の ip コマンドでこの PC のアドレスとポート 33520 を設定しておく)
+//   node tools/verify-device.js h8 COM11 57600  基板の線の速度を変えてあるとき(基板の baud コマンド)、その速度を渡す。
+//                                               4 つ目に PC の側の速度を渡すと、PC の側だけその速度にする(規格の一覧にない速度を試すため)
 // 機器の側は参照実装(optical-lab-device-protocol-reference)の C の模擬機器・H8 の道具・見本のジョブを使う(場所は oldp/reference.js)。
 // vca-hub は一時フォルダのデータで、このプロセスの中で動かす。
 
@@ -21,6 +23,9 @@ const { loadConfig, merge } = require(path.join(HUB, 'src', 'config.js'));
 const { createHub } = require(path.join(HUB, 'src', 'app.js'));
 const target = process.argv[2] || 'sim';
 const comPort = process.argv[3] || 'COM11';
+const baud = process.argv[4] || '9600';
+const pcBaud = process.argv[5] || '';
+const serialArgs = ['-Port', comPort, '-BaudRate', baud, ...(pcBaud ? ['-PcBaudRate', pcBaud] : [])];
 const overLan = target === 'h8lan';
 const isBoard = target === 'h8' || overLan;
 const sample = fs.readFileSync(path.join(ROOT, 'samples', 'frame-both.vca'), 'latin1').replace('REQ=FIL', 'ANS=TRC');
@@ -98,7 +103,7 @@ function pwsh(args) {
 }
 
 async function h8Command(cmd) {
-  const r = await pwsh(['tools/h8-session.ps1', '-Port', comPort, '-Command', cmd]);
+  const r = await pwsh(['tools/h8-session.ps1', ...serialArgs, '-Command', cmd]);
   if (r.code) throw new Error(`基板が応えません(${cmd}): ${r.out}`);
   return r.out.trim();
 }
@@ -106,7 +111,7 @@ async function h8Command(cmd) {
 let h8Trace = 360;
 async function h8Run(hubPort, cmd, { pair = false, trace = 0 } = {}) {
   if ((trace || 360) !== h8Trace) { h8Trace = trace || 360; await h8Command(`trace ${h8Trace}`); }
-  const a = ['tools/h8-session.ps1', '-Port', comPort, '-Command', cmd, ...(overLan ? ['-Lan'] : ['-Hub', `127.0.0.1:${hubPort}`])];
+  const a = ['tools/h8-session.ps1', ...serialArgs, '-Command', cmd, ...(overLan ? ['-Lan'] : ['-Hub', `127.0.0.1:${hubPort}`])];
   if (pair) a.push('-Pair');
   const r = await pwsh(a);
   const end = /(?:戻り値|\?\?\?)?\s*(-?\d+)[^\d-]+STATUS\s+(-?\d+)/.exec(r.out);
@@ -140,7 +145,7 @@ async function main() {
   const statusOf = id => hub.store.get(id).status;
   const describe = id => (hub.ext.describe(hub.store.get(id)).find(d => d.name === 'oldp') || { lines: [] }).lines.join(' / ');
 
-  console.log(`対象: ${target}  ホスト ${hostFp}  UART の待ち受け ${uartPort}`);
+  console.log(`対象: ${target}  ホスト ${hostFp}  UART の待ち受け ${uartPort}${isBoard && !overLan ? `  線の速度 ${baud}${pcBaud ? `(PC の側 ${pcBaud})` : ''} bps` : ''}`);
   try {
     if (isBoard) check('初期化: 覚えたホストを消す', /ok/.test(await h8Command('unpair')));
 
