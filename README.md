@@ -7,6 +7,9 @@ vca-hub に機能を加える拡張を置くリポジトリである。
 | `oldp/` | OLDP([Optical Lab Device Protocol](https://github.com/NrivYuki/optical-lab-device-protocol))の通信方式と、機器のペアリングの管理画面 |
 | `tests/` | vca-hub を通した疎通のテスト |
 | `tools/verify-device.js` | 機器の側の実装を vca-hub とつなぎ、規格の流れを一通り確かめる道具 |
+| `tools/attack-uart.js` | 機器と vca-hub の間の UART の線に割り込む相手を置き、フレームの差し込み・書き換え・送り直し・捨てることに対する動作を確かめる道具 |
+| `tools/attack-tcp.js` | 同じことを TCP の線で行う道具。線の上に平文や静的な公開鍵が現れないこと、なりすましのホストと機器を断ることも確かめる |
+| `tools/fuzz-hub.js` | vca-hub の OLDP の待ち受けを乱数で作った入力で叩き、止まらないこと・メモリが増え続けないこと・管理画面のペアリングを外から操作できないことを確かめる道具 |
 
 ## 必要なもの
 
@@ -63,6 +66,26 @@ node tools/verify-device.js h8lan COM3
 
 ```
 node tools/verify-device.js h8 COM3 57600
+```
+
+`tools/attack-uart.js` は、機器と vca-hub の UART の待ち受けの間に中継を挟み、線に割り込む相手と同じことを行う(電気の層の攻撃は扱わない)。
+
+```
+node tools/attack-uart.js sim
+node tools/attack-uart.js h8 COM3
+```
+
+`tools/attack-tcp.js` は、TCP の待ち受けの前に中継を挟んで同じことを行う。H8 の基板では LAN を使う(基板の `ip` コマンドで、この PC のアドレスとポート 33520 を設定しておく)。
+
+```
+node tools/attack-tcp.js sim
+node tools/attack-tcp.js h8lan COM3
+```
+
+`tools/fuzz-hub.js` は、vca-hub をこのプロセスの中で動かし、ハンドシェイクの前の壊れた入力、ペアリングした機器からの形の崩れたメッセージ、組み立て途中のメッセージによるメモリの増え方、ハンドシェイクを始めない接続による締め出し、管理画面の操作の制限を確かめる。引数は回数の倍率である。
+
+```
+node --expose-gc tools/fuzz-hub.js 1
 ```
 
 ## 確かめた環境
