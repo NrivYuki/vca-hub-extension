@@ -8,6 +8,7 @@
 // 機器の側は参照実装(optical-lab-device-protocol-reference)の C の模擬機器・H8 の道具・見本のジョブを使う(場所は oldp/reference.js)。
 // vca-hub は一時フォルダのデータで、このプロセスの中で動かす。
 
+const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
@@ -232,6 +233,10 @@ async function main() {
       r = await run('put T-30', { pair: true });
       check('鍵の交換の準備: もう一度ペアリングする', r.rc === -5 && logValue(r.log, 'fail') === '3', r.log);
       route('POST', 'trust')({ body: { fingerprint: devFp } });
+      // 規格 15 章: 2 の方法の機器は、新しく入れた種で鍵を作る。種を入れる前の鍵の交換は断る
+      r = await run('rekey 1');
+      check('OLDPKEY: 新しい種を入れる前は、鍵を交換しない', r.rc === -20, r.log);
+      check('OLDPKEY: 新しい種を入れる(人の操作)', /ok/.test(await h8Command(`seed ${crypto.randomBytes(32).toString('hex')}`)));
       r = await run('rekey 1');
       check('OLDPKEY: 鍵の交換をホストが受け付ける', r.rc === 0 && r.status === 0, `${r.sec} 秒 ${r.log}`);
       const newFp = (await h8Command('id')).split(/\s+/).pop();
@@ -245,6 +250,8 @@ async function main() {
       await h8Command('reset').catch(() => {});
       await wait(1500);
       check('OLDPKEY: 起動し直しても新しい鍵のまま', (await h8Command('id')).includes(newFp));
+      r = await run('rekey 1');
+      check('OLDPKEY: 鍵の交換に使った種では、もう交換しない', r.rc === -20, r.log);
       check('書き込んだときの鍵に戻す', /ok/.test(await h8Command('keyreset')) && (await h8Command('id')).includes(devFp));
       check('機器のペアリングを解除する(終わりの片付け)', /ok/.test(await h8Command('unpair')));
     } else {

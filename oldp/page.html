@@ -42,6 +42,8 @@
 <div class="fp" id="host">-</div>
 <h3>ペアリング待ち</h3>
 <table><thead><tr><th>フィンガープリント</th><th>機器</th><th>つないだところ</th><th></th></tr></thead><tbody id="pending"></tbody></table>
+<h3>拒んだ機器(ペアリング待ちで「拒む」を選んだもの。「戻す」を選ぶまで、つないでもペアリング待ちに出ない)</h3>
+<table><thead><tr><th>フィンガープリント</th><th>機器</th><th></th></tr></thead><tbody id="rejected"></tbody></table>
 <h3>ペアリングした機器</h3>
 <table><thead><tr><th>フィンガープリント</th><th>機器</th><th>ペアリングした日時</th><th></th></tr></thead><tbody id="trusted"></tbody></table>
 <h3>いまつないでいる機器</h3>
@@ -63,14 +65,17 @@ async function load() {
   $('host').textContent = r.host;
   const pend = Object.entries(r.pending), tr = Object.entries(r.trusted);
   $('pending').innerHTML = pend.map(([fp, d]) => `<tr class="pending"><td class="mono">${esc(fp)}</td><td>${dev(d)}</td><td class="mono">${esc(d.from)}</td>
-    <td><button class="on" data-trust="${esc(fp)}">信じる</button> <button data-drop="${esc(fp)}">消す</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty">ありません</td></tr>';
+    <td><button class="on" data-trust="${esc(fp)}">信じる</button> <button data-drop="${esc(fp)}">拒む</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty">ありません</td></tr>';
   $('trusted').innerHTML = tr.map(([fp, d]) => `<tr><td class="mono">${esc(fp)}</td><td>${dev(d)}</td><td>${esc((d.trustedAt || '').slice(0, 16).replace('T', ' '))}</td>
     <td><button data-drop="${esc(fp)}">外す</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty">ありません</td></tr>';
+  $('rejected').innerHTML = Object.entries(r.rejected || {}).map(([fp, d]) => `<tr><td class="mono">${esc(fp)}</td><td>${dev(d)}</td>
+    <td><button data-restore="${esc(fp)}">戻す</button></td></tr>`).join('') || '<tr><td colspan="3" class="empty">ありません</td></tr>';
   const con = await call('connected');
   $('connected').innerHTML = con.map(d => `<tr><td class="mono">${esc(d.fingerprint)}</td><td>${dev(d)}</td><td><button data-ping="${esc(d.fingerprint)}">PING</button></td></tr>`).join('') || '<tr><td colspan="3" class="empty">ありません</td></tr>';
   for (const b of document.querySelectorAll('[data-ping]')) b.onclick = async () => { try { const r = await call('ping', { fingerprint: b.dataset.ping }); b.textContent = `PING ${r.ms} ms`; } catch (e) { $('msg').hidden = false; $('msg').textContent = e.message; } };
   for (const b of document.querySelectorAll('[data-trust]')) b.onclick = () => act('trust', b.dataset.trust);
   for (const b of document.querySelectorAll('[data-drop]')) b.onclick = () => act('untrust', b.dataset.drop);
+  for (const b of document.querySelectorAll('[data-restore]')) b.onclick = () => act('restore', b.dataset.restore);
 }
 async function act(what, fingerprint) {
   try { await call(what, { fingerprint }); $('msg').hidden = true; await load(); } catch (e) { $('msg').hidden = false; $('msg').textContent = e.message; }

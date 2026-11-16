@@ -237,7 +237,7 @@ test('送り先: vca-hub が機器としてこの規格のホストへ PUT す�
 const wait = ms => new Promise(r => setTimeout(r, ms));
 function availSink() { const names = []; return { names, handlers: { AVAIL: ({ records }) => { names.push(records[0][1]); return 0; } } }; }
 
-test('AVAIL: 送信待ちにしたら、つないでいる受け取りの機器へ知らせ、つないだときにも知らせる。受け取らない機器には知らせない', async () => {
+test('AVAIL: 送信待ちにしたら、つないでいる機器へ知らせ、つないだときにも知らせる。LABELS の無い機器は全ての項目を受け取るものとして知らせる(規格 9 章)', async () => {
   const h = await makeHub();
   try {
     const e1 = h.hub.store.saveReceived({ body: sample.replace('REQ=FIL', 'ANS=TRC'), type: 'TRC', job: 'A-1', peer: 't', crcOk: null });
@@ -257,7 +257,7 @@ test('AVAIL: 送信待ちにしたら、つないでいる受け取りの機器�
       h.hub.store.queue(e2.id, 'AV-2');
       await wait(100);
       assert.deepEqual(sink.names, ['AV-1', 'AV-2'], '送信待ちにしたら知らせる');
-      assert.deepEqual(tsink.names, [], 'トレーサーには知らせない');
+      assert.deepEqual(tsink.names, ['AV-1', 'AV-2'], 'LABELS の無いトレーサーにも知らせる');
       assert.equal(h.route('GET', 'connected')({}).length, 2);
       const ping = await h.route('POST', 'ping')({ body: { fingerprint: P.noise.fingerprint(keys.publicKey) } });
       assert.equal(ping.ok, true);
@@ -299,7 +299,50 @@ test('PUT: 同じジョブの同じ中身は 2 度目を保存しない。中身
       assert.equal(h.hub.store.list().length, 1);
       assert.equal((await s.request('PUT', job('D-2'))).status, 0);
       assert.equal(h.hub.store.list().length, 2, 'ジョブの名前が違えば別のもの');
+      const other = [['JOB', 'D-1'], ['DBL', '19.00'], ['TRCFMT', '1', '3', 'E', 'R', 'F'], ['R', '1', '2', '3']];
+      assert.equal((await s.request('PUT', other)).status, 8, '同じ JOB で中身が違えば STATUS=8 で断る(規格 8 章)');
+      assert.equal(h.hub.store.list().length, 2, '断ったものは保存しない');
+      assert.equal((await s.request('PUT', [...job('D-1'), ['BETA:X', '1']])).status, 8, '捨てる項目だけが違っても、中身が違うので STATUS=8');
+      // 渡し終えた後の同じ JOB は、新しいジョブとして受ける
+      const first = h.hub.store.list().find(e => e.job === 'D-1');
+      h.hub.store.queue(first.id, 'D-1');
+      h.hub.store.markSent(first.id, 'test');
+      assert.equal((await s.request('PUT', other)).status, 0, '渡し終えた後の同じ JOB は受ける');
+      assert.equal(h.hub.store.list().length, 3);
     } finally { s.close(); }
+  } finally { await h.done(); }
+});
+
+test('ペアリング: 拒んだ鍵は、戻すまでペアリング待ちに出さない(規格 6 章)', async () => {
+  const h = await makeHub();
+  try {
+    const k = P.noise.keyPair(), fp = P.noise.fingerprint(k.publicKey);
+    const hostFp = h.route('GET', 'peers')({}).host;
+    const open = () => P.connect('127.0.0.1', h.port, { keys: k, caps: tracerCaps, trust: p => p.fingerprint === hostFp });
+    await assert.rejects(open(), e => e.failCode === 3);
+    assert.ok(h.route('GET', 'peers')({}).pending[fp]);
+    h.route('POST', 'untrust')({ body: { fingerprint: fp } });
+    await assert.rejects(open(), e => e.failCode === 3);
+    assert.ok(!h.route('GET', 'peers')({}).pending[fp], '拒んだ鍵は出さない');
+    assert.ok(h.route('GET', 'peers')({}).rejected[fp]);
+    h.route('POST', 'restore')({ body: { fingerprint: fp } });
+    await assert.rejects(open(), e => e.failCode === 3);
+    assert.ok(h.route('GET', 'peers')({}).pending[fp], '戻した後は出す');
+  } finally { await h.done(); }
+});
+
+test('同じ鍵の機器と新しいセッションを始めたら、前のセッションを終える(規格 6 章)', async () => {
+  const h = await makeHub();
+  try {
+    const k = P.noise.keyPair();
+    const s1 = await pairAndConnect(h, k, tracerCaps);
+    const closed = new Promise(r => s1.once('close', r));
+    const hostFp = h.route('GET', 'peers')({}).host;
+    const s2 = await P.connect('127.0.0.1', h.port, { keys: k, caps: tracerCaps, trust: p => p.fingerprint === hostFp });
+    try {
+      await closed;
+      assert.equal(h.route('GET', 'connected')({}).length, 1);
+    } finally { s2.close(); }
   } finally { await h.done(); }
 });
 

@@ -19,9 +19,10 @@ const { P } = require('./reference.js');
 const hostKey = require('./hostkey.js');
 const R = P.records;
 
-const VERSION = '1.0';
+const VERSION = '1.1';
 const AVAIL_LIMIT = 8;        // つないだときに知らせる送信待ちの数の上限
 const PUT_MEMORY = 500;       // 同じ PUT を見分けるために覚えておく数
+const PENDING_LIMIT = 100;    // ペアリング待ちに載せる機器の数の上限(規格 6 章)
 const EXT_PER_LINE = 8;       // 1 行 80 文字に収まる名前空間の数
 
 // 拡張の登録(名前空間 → 処理)
@@ -79,24 +80,35 @@ module.exports = {
     const fp = P.noise.fingerprint(keys.publicKey);
     // ペアリングした機器と、ペアリング待ちの機器(フィンガープリントごと)
     const peers = fs.existsSync(peersFile) ? JSON.parse(fs.readFileSync(peersFile, 'utf8')) : { trusted: {}, pending: {} };
+    peers.rejected = peers.rejected || {};   // 人が拒んだ鍵。人が戻すまでペアリング待ちに出さない(規格 6 章)
     const savePeers = () => { const t = peersFile + '.tmp'; fs.writeFileSync(t, JSON.stringify(peers, null, 1)); fs.renameSync(t, peersFile); };
     const who = caps => ({ dev: caps.dev, ven: caps.ven, model: caps.model, sn: caps.sn });
-    const hostCaps = [['VER', VERSION], ['DEV', 'HST'], ['VEN', 'vca-hub'], ['MODEL', 'vca-hub'], ['MAXFRAME', '8192']];
+    // MAXREQ: 機器が応答を待たずに出してよい要求の数(規格 9 章)。要求ごとに応答を返すので、同時に受けられる
+    const hostCaps = [['VER', VERSION], ['DEV', 'HST'], ['VEN', 'vca-hub'], ['MODEL', 'vca-hub'], ['MAXFRAME', '8192'], ['MAXREQ', '8']];
     const vendorCtx = { hub, peers, savePeers, noise: P.noise };
     for (const v of vendors.values()) if (v.setup) v.setup(vendorCtx);
 
     // 同じ PUT を 2 度保存しない(規格 8 章)。ジョブの名前と中身の要約 → 保存した受信データの id
     const putsFile = path.join(dir, 'puts.json');
     const puts = new Map(fs.existsSync(putsFile) ? JSON.parse(fs.readFileSync(putsFile, 'utf8')) : []);
-    const savePuts = () => { const t = putsFile + '.tmp'; fs.writeFileSync(t, JSON.stringify([...puts])); fs.renameSync(t, putsFile); };
+    // ジョブの名前 → 最後に保存した PUT の [要約, 受信データの id](同じ JOB で中身の違う PUT を断るため。規格 8 章)
+    const putJobsFile = path.join(dir, 'put-jobs.json');
+    const putJobs = new Map(fs.existsSync(putJobsFile) ? JSON.parse(fs.readFileSync(putJobsFile, 'utf8')) : []);
+    const savePuts = () => {
+      for (const [f, m] of [[putsFile, puts], [putJobsFile, putJobs]]) { const t = f + '.tmp'; fs.writeFileSync(t, JSON.stringify([...m])); fs.renameSync(t, f); }
+    };
 
     // つないでいる機器(フィンガープリント → セッション)。AVAIL と PING に使う
     const connected = new Map();
-    const receives = s => s.peer && (s.peer.caps.labels.length > 0 || s.peer.caps.trace);
+    // LABELS が無い機器は、辞書の全ての項目を受け取る機器として扱う(規格 9 章)。そのため、つないでいる全ての機器へ知らせる
+    const receives = s => !!s.peer;
     const avail = (s, name) => s.request('AVAIL', [['JOB', name]]).catch(() => { /* 切れていれば、次につないだときに知らせる */ });
     hub.on('queued', ({ entry }) => { for (const s of connected.values()) if (receives(s)) avail(s, entry.name); });
     function track(s) {
       s.on('open', peer => {
+        // 同じ鍵の機器と新しいセッションを始めたら、前のセッションを終える(規格 6 章)
+        const old = connected.get(peer.fingerprint);
+        if (old && old !== s) old.close();
         connected.set(peer.fingerprint, s);
         const forget = () => { if (connected.get(peer.fingerprint) === s) connected.delete(peer.fingerprint); };
         s.once('close', forget);
@@ -113,7 +125,7 @@ module.exports = {
 
     // ---- 管理画面: ペアリング ----
     hub.page('page.html', '機器のペアリング');
-    hub.route('GET', 'peers', () => ({ host: fp, trusted: peers.trusted, pending: peers.pending }));
+    hub.route('GET', 'peers', () => ({ host: fp, trusted: peers.trusted, pending: peers.pending, rejected: peers.rejected }));
     hub.route('GET', 'connected', () => [...connected.values()].map(s => ({ fingerprint: s.peer.fingerprint, ...who(s.peer.caps) })));
     hub.route('POST', 'ping', async ({ body }) => {
       const s = connected.get(body.fingerprint);
@@ -133,10 +145,20 @@ module.exports = {
     });
     hub.route('POST', 'untrust', ({ body }) => {
       const p = peers.trusted[body.fingerprint] || peers.pending[body.fingerprint];
+      // ペアリング待ちから消したものは、拒んだ鍵として残す(人が戻すまで、ペアリング待ちに出さない)
+      if (peers.pending[body.fingerprint]) peers.rejected[body.fingerprint] = { ...peers.pending[body.fingerprint], rejectedAt: new Date().toISOString() };
       delete peers.trusted[body.fingerprint];
       delete peers.pending[body.fingerprint];
       savePeers();
+      // ペアリングを解除したら、その機器とのセッションを終える(規格 6 章)
+      const s = connected.get(body.fingerprint);
+      if (s) s.close();
       if (p) hub.log('info', { detail: `機器 ${p.ven} ${p.model}(${body.fingerprint})のペアリングを解除した` });
+      return { ok: true };
+    });
+    hub.route('POST', 'restore', ({ body }) => {
+      delete peers.rejected[body.fingerprint];
+      savePeers();
       return { ok: true };
     });
 
@@ -157,7 +179,8 @@ module.exports = {
           const addr = `${socket.remoteAddress}:${socket.remotePort}`.replace(/^::ffff:/, '');
           const delivering = new Map();   // ジョブの名前 → 渡した受信データの id(RESULT を待つ)
           return {
-            keys, caps: [...hostCaps, ...listLines('EXT', [...vendors.keys()]), ...listLines('REQUIRE', (settings && settings.require) || [])],
+            // REQUIRE= に書く名前空間は、自分の EXT= にも書く(規格 9 章)
+            keys, caps: [...hostCaps, ...listLines('EXT', [...new Set([...vendors.keys(), ...((settings && settings.require) || [])])]), ...listLines('REQUIRE', (settings && settings.require) || [])],
             // シリアルの機器を TCP へ中継してつなぐときは、待ち受けの settings に { "transport": "uart" } と書く
             transport: settings && settings.transport === 'uart' ? 'uart' : 'tcp',
             trust(peer) {
@@ -165,7 +188,11 @@ module.exports = {
                 for (const v of vendors.values()) if (v.trusted) v.trusted(peer, vendorCtx);
                 return true;
               }
-              if (!peers.pending[peer.fingerprint]) {
+              if (peers.rejected[peer.fingerprint]) {
+                io.log('warn', { event: 'rejected', detail: `拒んだ鍵の機器 ${peer.caps.ven} ${peer.caps.model}(${peer.fingerprint})` });
+                return false;
+              }
+              if (!peers.pending[peer.fingerprint] && Object.keys(peers.pending).length < PENDING_LIMIT) {
                 peers.pending[peer.fingerprint] = { ...who(peer.caps), from: addr, at: new Date().toISOString() };
                 savePeers();
               }
@@ -188,13 +215,26 @@ module.exports = {
                 const dropped = c.ignored.filter(l => R.VENDOR.test(l));
                 const keep = records.filter(r => r[0] !== 'JOB' && !dropped.includes(r[0]));
                 const text = R.format(keep);
-                const digest = crypto.createHash('sha256').update(`${job}\0${text}`).digest('hex');
+                // 同じかどうかは、受けたメッセージの中身(捨てる項目を含む)で比べる(規格 8 章)
+                const digest = crypto.createHash('sha256').update(R.format(records)).digest('hex');
+                // 1 度目の PUT のジョブを、まだ機器へ渡し終えていない間だけ、同じ PUT・同じ JOB の PUT として扱う(規格 8 章)
+                const held = id => { const e = id && hub.store.get(id); return !!e && e.status !== 'sent'; };
                 const known = puts.get(digest);
-                if (!known || !hub.store.get(known)) {
+                // 同じ JOB で中身の違う PUT は、保存せずに STATUS=8 で断る(ホストがそのジョブを持っている間。規格 8 章)
+                const [prevDigest, prevId] = putJobs.get(job) || [];
+                if (prevDigest && prevDigest !== digest && held(prevId)) {
+                  io.log('warn', { event: 'upload', job, detail: `同じ JOB で中身の違うジョブを受信済み(${prevId})。STATUS=8 で断った` });
+                  return { records: [['STATUS', '8']] };
+                }
+                if (!held(known)) {
                   const e = io.receive({ body: text, job, peer: `${peer.caps.ven} ${peer.caps.model} ${addr}`, type: peer.caps.dev || 'TRC' });
                   puts.delete(digest);
                   puts.set(digest, e.id);
+                  putJobs.delete(job);
+                  putJobs.set(job, [digest, e.id]);
                   while (puts.size > PUT_MEMORY) puts.delete(puts.keys().next().value);
+                  // 渡し終えたか消したジョブは、同じ JOB の確かめに要らないので忘れる(渡し終えていないものは数にかかわらず残す)
+                  for (const [j, [, id]] of putJobs) if (!held(id)) putJobs.delete(j);
                   savePuts();
                 } else io.log('info', { event: 'upload', job, detail: `同じ内容を受信済み(${known})。2 度目は保存しない` });
                 return { records: dropped.length ? [['STATUS', '0'], ['IGNORED', ...dropped]] : [['STATUS', '0']] };
@@ -223,7 +263,9 @@ module.exports = {
                 if (result.ignored.length || result.rejected.length) {
                   io.log('warn', { event: 'ext', job, detail: `${device} が捨てた ${result.ignored.join(',') || '-'} / 受けられない ${result.rejected.join(',') || '-'}` });
                 }
-                if (status === 0) io.markSent(id, device);
+                // 2 台が同じジョブを取ったときは、先に STATUS=0 を返した機器にだけ渡し終えたものとする(規格 8 章)
+                const entry = hub.store.get(id);
+                if (status === 0 && (!entry || entry.status === 'queued')) io.markSent(id, device);
                 return 0;
               },
               INFO({ records }) { io.log('info', { event: 'job-complete', detail: R.format(records).replace(/\r\n/g, ' ').trim() }); return 0; },
