@@ -387,3 +387,82 @@ test('加工条件の拡張と一緒に使うと、この規格の加工機へ�
     } finally { s.close(); }
   } finally { await h2.done(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ---- 渡している途中のジョブを押さえる(vca-hub の io.reserve。規格 8 章) ----
+async function queuedJob(h, name) {
+  const e = h.hub.store.saveReceived({ body: sample, type: 'TRC', job: 'R-0', peer: 'p', crcOk: null });
+  h.hub.store.queue(e.id, name);
+  return e.id;
+}
+async function dcsEdger(h, job) {
+  const d = await T.connectDevice('127.0.0.1', h.ports.remote, { connectDelay: 0, timeouts: FAST });
+  try { return await d.request('EDG', { job, records: [['DEV', 'EDG'], ['VEN', 'DCS'], ['MODEL', 'E']] }); } finally { d.socket.destroy(); }
+}
+const until = async (f, ms = 3000) => { const t = Date.now() + ms; while (!f()) { if (Date.now() > t) assert.fail('時間内に変わりませんでした'); await new Promise(r => setTimeout(r, 20)); } };
+
+test('2 台が同じジョブを GET したら、DATA を渡すのは 1 台だけ。RESULT を待つ間は、ほかの機器に STATUS=6、DCS の加工機に STATUS=11', async () => {
+  const h = await makeHub();
+  try {
+    const id = await queuedJob(h, 'R-1');
+    const a = await pairAndConnect(h, P.noise.keyPair(), edgerCaps);
+    const b = await pairAndConnect(h, P.noise.keyPair(), edgerCaps);
+    try {
+      const ra = await a.request('GET', [['JOB', 'R-1']]);
+      assert.equal(ra.opName, 'DATA');
+      const rb = await b.request('GET', [['JOB', 'R-1']]);
+      assert.equal(rb.opName, 'RESULT');
+      assert.equal(rb.status, 6, 'いまは受けられない(送り直してよい)');
+      assert.equal((await dcsEdger(h, 'R-1')).status, 11, '表 A.24 の 11');
+      await a.request('RESULT', [['JOB', 'R-1'], ['STATUS', '0']]);
+      assert.equal(h.hub.store.get(id).status, 'sent');
+      assert.equal(h.hub.store.get(id).sent.length, 1);
+      const again = await b.request('GET', [['JOB', 'R-1']]);
+      assert.equal(again.status, 1, '渡し終えたジョブの GET は STATUS=1(規格 8 章)');
+    } finally { a.close(); b.close(); }
+  } finally { await h.done(); }
+});
+
+test('機器が受けなかった(RESULT の STATUS が 0 でない)ら、押さえたジョブを放し、ほかの機器が取れる', async () => {
+  const h = await makeHub();
+  try {
+    const id = await queuedJob(h, 'R-2');
+    const a = await pairAndConnect(h, P.noise.keyPair(), edgerCaps);
+    const b = await pairAndConnect(h, P.noise.keyPair(), edgerCaps);
+    try {
+      assert.equal((await a.request('GET', [['JOB', 'R-2']])).opName, 'DATA');
+      await a.request('RESULT', [['JOB', 'R-2'], ['STATUS', '4'], ['REJECTED', 'ETYP']]);
+      assert.equal(h.hub.store.get(id).status, 'queued');
+      assert.equal((await b.request('GET', [['JOB', 'R-2']])).opName, 'DATA');
+    } finally { a.close(); b.close(); }
+  } finally { await h.done(); }
+});
+
+test('RESULT の前に切れたら、押さえたジョブを放して送信待ちに戻し、記録に残す。DCS の加工機が受け取れる', async () => {
+  const h = await makeHub();
+  try {
+    const id = await queuedJob(h, 'R-3');
+    const a = await pairAndConnect(h, P.noise.keyPair(), edgerCaps);
+    assert.equal((await a.request('GET', [['JOB', 'R-3']])).opName, 'DATA');
+    a.close();
+    await until(() => h.hub.store.findQueued('R-3'));
+    assert.ok(h.hub.log.list().some(l => l.event === 'download-unconfirmed' && /接続が切れた/.test(l.detail)));
+    assert.equal((await dcsEdger(h, 'R-3')).status, 0);
+    await until(() => h.hub.store.get(id).status === 'sent');
+  } finally { await h.done(); }
+});
+
+test('RESULT が来ないまま接続が続いたら、待つ時間(settings の resultWait)を過ぎたところで放す。遅れて来た STATUS=0 の RESULT は記録する', async () => {
+  const h = await makeHub({ listeners: [{ name: '新しい規格', port: 0, protocol: 'oldp', settings: { resultWait: 1 } }] });
+  try {
+    const id = await queuedJob(h, 'R-4');
+    const a = await pairAndConnect(h, P.noise.keyPair(), edgerCaps);
+    try {
+      assert.equal((await a.request('GET', [['JOB', 'R-4']])).opName, 'DATA');
+      assert.equal(h.hub.store.findQueued('R-4'), null, '待つ間は押さえている');
+      await until(() => h.hub.store.findQueued('R-4'), 3000);
+      assert.ok(h.hub.log.list().some(l => l.event === 'download-unconfirmed' && /RESULT が来なかった/.test(l.detail)));
+      await a.request('RESULT', [['JOB', 'R-4'], ['STATUS', '0']]);
+      assert.equal(h.hub.store.get(id).status, 'sent', '機器は受け取っているので、送信済みにする');
+    } finally { a.close(); }
+  } finally { await h.done(); }
+});

@@ -23,6 +23,9 @@ const VERSION = '1.1';
 const AVAIL_LIMIT = 8;        // つないだときに知らせる送信待ちの数の上限
 const PUT_MEMORY = 500;       // 同じ PUT を見分けるために覚えておく数
 const PENDING_LIMIT = 100;    // ペアリング待ちに載せる機器の数の上限(規格 6 章)
+// DATA を渡してから RESULT を待つ時間(秒)。過ぎたら押さえたジョブを放し、送信待ちに戻す(ほかの機器が取れるように)。
+// 規格は RESULT を送るまでの時間を決めていないので、応答の時間切れ(規格 8 章の 30 秒)に合わせる
+const RESULT_WAIT = 30;     // 秒。待ち受けの settings の resultWait で変えられる
 const EXT_PER_LINE = 8;       // 1 行 80 文字に収まる名前空間の数
 
 // 拡張の登録(名前空間 → 処理)
@@ -178,6 +181,19 @@ module.exports = {
           if (!io.allowed(socket.remoteAddress)) { io.log('warn', { event: 'rejected', detail: `${socket.remoteAddress} は許可範囲の外` }); return null; }
           const addr = `${socket.remoteAddress}:${socket.remotePort}`.replace(/^::ffff:/, '');
           const delivering = new Map();   // ジョブの名前 → 渡した受信データの id(RESULT を待つ)
+          // 渡している途中のデータを、この接続のために押さえる(vca-hub の io.reserve)。RESULT を受けるまで、ほかの機器と VCA の加工機には渡さない。
+          // io.reserve の無い vca-hub では、探すだけにする(押さえない)
+          const holder = { addr };
+          const reserve = job => (io.reserve ? io.reserve(job, holder) : (e => e && { entry: e })(io.queued(job)));
+          const release = id => (io.release ? io.release(id, holder) : false);
+          const waits = new Map();        // 押さえた受信データの id → RESULT を待つ時間のタイマー
+          const resultWait = settings && settings.resultWait > 0 ? Number(settings.resultWait) : RESULT_WAIT;
+          const stopWait = id => { clearTimeout(waits.get(id)); waits.delete(id); };
+          const unconfirmed = (id, job, why) => io.log('warn', { event: 'download-unconfirmed', job, detail: `${id} 送信待ちに戻した(${why})` });
+          socket.once('close', () => {
+            for (const id of waits.keys()) stopWait(id);
+            for (const id of io.releaseAll ? io.releaseAll(holder) : []) unconfirmed(id, undefined, 'RESULT の前に接続が切れた');
+          });
           return {
             // REQUIRE= に書く名前空間は、自分の EXT= にも書く(規格 9 章)
             keys, caps: [...hostCaps, ...listLines('EXT', [...new Set([...vendors.keys(), ...((settings && settings.require) || [])])]), ...listLines('REQUIRE', (settings && settings.require) || [])],
@@ -241,12 +257,23 @@ module.exports = {
               },
               GET({ records, peer }) {
                 const job = (records.find(r => r[0] === 'JOB') || [])[1];
-                const entry = job && io.queued(job);
-                if (!entry) { io.log('warn', { event: 'download', job, result: 'STATUS=1' }); return 1; }
+                // 探すことと押さえることを 1 度に行う(RESULT を待つ間に、ほかの機器へ同じデータを渡さない)
+                const got = job && reserve(job);
+                if (!got) { io.log('warn', { event: 'download', job, result: 'STATUS=1' }); return 1; }
+                // ほかの機器か VCA の加工機へ渡している途中。STATUS=6(いまは受けられない。機器は 5 秒以上あけて送り直してよい。規格 8 章)
+                if (got.busy) { io.log('warn', { event: 'download', job, result: 'STATUS=6', detail: 'ほかの機器へ渡している途中' }); return 6; }
+                const { entry } = got;
                 const c = peer.caps;
                 const profile = { labels: c.labels, trcfmt: { fmt: 1, n: (c.trace && c.trace.n) || 0, mode: (c.trace && c.trace.mode) || 'E', eye: 'B' } };
-                const out = toProtocol(io.records(entry, { device: who(c), profile }));
+                let out;
+                try { out = toProtocol(io.records(entry, { device: who(c), profile })); } catch (e) { release(entry.id); throw e; }
                 delivering.set(job, entry.id);
+                // RESULT が来ないまま接続が続いても、ジョブを押さえ続けない
+                stopWait(entry.id);
+                waits.set(entry.id, setTimeout(() => {
+                  waits.delete(entry.id);
+                  if (release(entry.id)) unconfirmed(entry.id, job, `${resultWait} 秒のあいだ RESULT が来なかった`);
+                }, resultWait * 1000).unref());
                 return { records: [['JOB', job], ...out] };
               },
               RESULT({ records, peer }) {
@@ -255,6 +282,7 @@ module.exports = {
                 const id = job && delivering.get(job);
                 if (!id) return 0;
                 delivering.delete(job);
+                stopWait(id);
                 const status = Number(v('STATUS')[0]);
                 const device = `${peer.caps.ven} ${peer.caps.model}`;
                 const result = { at: new Date().toISOString(), device, status, ignored: v('IGNORED').filter(Boolean), rejected: v('REJECTED').filter(Boolean) };
@@ -265,7 +293,9 @@ module.exports = {
                 }
                 // 2 台が同じジョブを取ったときは、先に STATUS=0 を返した機器にだけ渡し終えたものとする(規格 8 章)
                 const entry = hub.store.get(id);
+                // 送信済みにすれば押さえたものも放れる。受けなかった(STATUS が 0 でない)ときは放して、送信待ちに戻す
                 if (status === 0 && (!entry || entry.status === 'queued')) io.markSent(id, device);
+                else release(id);
                 return 0;
               },
               INFO({ records }) { io.log('info', { event: 'job-complete', detail: R.format(records).replace(/\r\n/g, ' ').trim() }); return 0; },
