@@ -78,6 +78,7 @@ async function main() {
   const caps = [['VER', '1.0'], ['DEV', 'EDG'], ['VEN', 'FUZZ'], ['MODEL', 'F'], ['MAXFRAME', '4096'], ['EXT', 'ACME']];
   const connectDev = () => P.connect('127.0.0.1', ports.listeners.tcp, { keys: devKeys, caps, trust: () => true, timeoutMs: 3000 });
   const mem = () => { if (global.gc) global.gc(); return process.memoryUsage().heapUsed + process.memoryUsage().arrayBuffers; };
+  const settledMem = async () => { for (let k = 0; k < 5; k++) { await wait(100); mem(); } return mem(); };
 
   try {
     // ペアリング
@@ -164,8 +165,15 @@ async function main() {
           for (let b = 0; b < per; b += chunk.length) { await dev.sendMessage(P.OPS.PUT, id, 1, chunk); bytes += chunk.length; }
         }
       } catch (e) { console.log('    (送る途中で閉じられた:', e.message, ')'); }
-      await wait(500);
-      const grown = mem() - before;
+      // TCP の送り方は、ソケットに書いたらすぐに終わりを返すので、この時点では送ったものの多くが、まだ機器の側の送り待ちと
+      // ホストが読む前のところにある(このプロセスのメモリに数えられる)。応答を待つ要求を 1 つ送り、応答が来てから測る
+      // (ホストはメッセージを届いた順に処理するので、応答が来れば、それより前に送ったものは処理し終えている)。
+      // 送った量を処理し終えるまでに、要求の時間切れ(3 秒)より長くかかることがあるので、応答が来るまで送り直す
+      let answered = false;
+      for (let t = 0; t < 10 && !answered; t++) answered = await dev.request('PING').then(() => true, () => false);
+      if (!answered) console.log('    (PING に応答が無いまま測った)');
+      // GC の後も、ArrayBuffer のメモリは少し遅れて返るので、GC と短い待ちを何度か挟んでから測る
+      const grown = await settledMem() - before;
       console.log(`    (続きのフラグの付いたメッセージを ${ids} 個のリクエスト ID で計 ${(bytes / 1048576).toFixed(0)} MiB 送り、ホストのメモリは ${(grown / 1048576).toFixed(0)} MiB 増えた)`);
       check('D. 終わらないメッセージを多くのリクエスト ID で送っても、ホストのメモリは送った量に比例して増えない', grown < bytes / 4, `${(grown / 1048576).toFixed(0)} MiB / ${(bytes / 1048576).toFixed(0)} MiB`);
       dev.close();

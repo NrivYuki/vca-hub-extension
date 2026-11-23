@@ -286,16 +286,19 @@ module.exports = {
                 const status = Number(v('STATUS')[0]);
                 const device = `${peer.caps.ven} ${peer.caps.model}`;
                 const result = { at: new Date().toISOString(), device, status, ignored: v('IGNORED').filter(Boolean), rejected: v('REJECTED').filter(Boolean) };
-                const d = hub.data.get(id) || {};
-                hub.data.set(id, { ...d, results: (d.results || []).concat(result) });
+                // 2 台が同じジョブを取ったときは、先に STATUS=0 を返した機器にだけ渡し終えたものとする(規格 8 章)
+                const entry = hub.store.get(id);
+                // 送信済みにすれば押さえたものも放れる。受けなかった(STATUS が 0 でない)ときは放して、送信待ちに戻す。
+                // 送信済みは、拡張の情報より先に書く(書けなければ vca-hub が送信済みとして押さえたまま書き直し、ほかの機器へ渡さない)
+                if (status === 0 && (!entry || entry.status === 'queued')) io.markSent(id, device);
+                else release(id);
+                if (hub.store.get(id)) {
+                  const d = hub.data.get(id) || {};
+                  hub.data.set(id, { ...d, results: (d.results || []).concat(result) });
+                }
                 if (result.ignored.length || result.rejected.length) {
                   io.log('warn', { event: 'ext', job, detail: `${device} が捨てた ${result.ignored.join(',') || '-'} / 受けられない ${result.rejected.join(',') || '-'}` });
                 }
-                // 2 台が同じジョブを取ったときは、先に STATUS=0 を返した機器にだけ渡し終えたものとする(規格 8 章)
-                const entry = hub.store.get(id);
-                // 送信済みにすれば押さえたものも放れる。受けなかった(STATUS が 0 でない)ときは放して、送信待ちに戻す
-                if (status === 0 && (!entry || entry.status === 'queued')) io.markSent(id, device);
-                else release(id);
                 return 0;
               },
               INFO({ records }) { io.log('info', { event: 'job-complete', detail: R.format(records).replace(/\r\n/g, ' ').trim() }); return 0; },
